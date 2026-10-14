@@ -1,6 +1,7 @@
 /* Amar Union - shared data layer (public site + admin panel).
    LOCAL mode : config.js has no Supabase keys -> data in localStorage (same browser/origin). For testing only.
-   CLOUD mode : config.js has Supabase URL + anon key -> real database (see supabase/schema.sql). */
+   CLOUD mode : config.js has Supabase URL + anon key -> real database (see supabase/schema.sql).
+   SERVER mode: config.js has api:'api.php' -> PHP + SQLite on your own hosting (see api.php). Takes priority over CLOUD. */
 (function(){
 'use strict';
 const C=window.AU_CONFIG||{},CLOUD=!!(C.supabaseUrl&&C.supabaseKey),LK='au_db';
@@ -54,7 +55,7 @@ const ARR=['apps','vol','edu','proj','ppl','cm','news','spn','roles','log'],ser=
 async function push(d){const t=tk(),up=[],del=[],seen={};
  const add=(coll,id,obj)=>{const key=coll+'|'+id,s=ser(obj);seen[key]=1;if(SNAP[key]!==s)up.push({coll,id,s,key})};
  ARR.forEach(k=>(d[k]||[]).forEach(x=>{if(!x.id)x.id=IDS();add(k,x.id,x)}));['set','sch'].forEach(k=>add(k,'main',d[k]));
- for(const key in SNAP)if(!seen[key]&&!key.startsWith('u|')&&!(d.users||[]).some(u=>'u|'+u.id==key))del.push(key);
+ for(const key in SNAP)if(!seen[key]&&!key.startsWith('u|')&&!key.startsWith('log|')&&!(d.users||[]).some(u=>'u|'+u.id==key))del.push(key);
  for(let i=0;i<up.length;i+=100){const b=up.slice(i,i+100);await rest('/rest/v1/docs?on_conflict=coll,id',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:'['+b.map(u=>JSON.stringify({coll:u.coll,id:String(u.id),data:JSON.parse(u.s)})).join(',')+']'},t);b.forEach(u=>{SNAP[u.key]=u.s})}
  for(const key of del){if(key.startsWith('u|'))continue;const p=key.indexOf('|');await rest('/rest/v1/docs?coll=eq.'+encodeURIComponent(key.slice(0,p))+'&id=eq.'+encodeURIComponent(key.slice(p+1)),{method:'DELETE'},t);delete SNAP[key]}
  const uk={};(d.users||[]).forEach(u=>{const key='u|'+u.id,s=ser({uid:u.uid,name:u.name,role:u.role,on:u.on});uk[key]=1;if(SNAP[key]!==s){SNAP[key]=s;uk[key]=u}});
@@ -70,14 +71,45 @@ async profile(){const id=sessionStorage.getItem('au_uid'),t=tk();if(!t)return nu
 async login(id,pw){const r=await rest('/auth/v1/token?grant_type=password',{method:'POST',body:JSON.stringify({email:id,password:pw})});sessionStorage.setItem('au_tok',r.access_token);sessionStorage.setItem('au_rt',r.refresh_token);sessionStorage.setItem('au_uid',r.user.id);const p=await K.profile();if(!p){K.logout();throw new Error('no profile')}return p},
 async session(){if(!tk())return null;try{return await K.profile()}catch(e){return null}},
 logout(){['au_tok','au_rt','au_uid'].forEach(k=>sessionStorage.removeItem(k))},
-async load(){const t=tk(),rows=[];for(let o=0;;o+=1000){const r=await rest('/rest/v1/docs?select=coll,id,data&order=coll.asc,id.asc',{headers:{Range:o+'-'+(o+999)}},t);rows.push(...r);if(r.length<1000)break}
+async load(){const t=tk(),rows=[];for(let o=0;;o+=1000){const r=await rest('/rest/v1/docs?select=coll,id,data&coll=not.in.(bc,log)&order=coll.asc,id.asc',{headers:{Range:o+'-'+(o+999)}},t);rows.push(...r);if(r.length<1000)break}
+ rows.push(...await rest('/rest/v1/docs?select=coll,id,data&coll=eq.log&order=updated_at.desc&limit=200',{},t));
  const d=seed(false);ARR.forEach(k=>{d[k]=[]});
  rows.forEach(x=>{if(x.coll=='set'||x.coll=='sch')d[x.coll]=x.data;else if(d[x.coll])d[x.coll].push(x.data)});
  d.log.sort((a,b)=>b.t-a.t);const pr=await rest('/rest/v1/profiles?select=*',{},t);d.users=pr.map(p=>({id:p.user_id,uid:p.uid,name:p.name,role:p.role,on:p.active}));
  if(!d.roles.length)d.roles=DR();
- SNAP={};ARR.forEach(k=>d[k].forEach(x=>{SNAP[k+'|'+x.id]=ser(x)}));['set','sch'].forEach(k=>{if(rows.some(r=>r.coll==k))SNAP[k+'|main']=ser(d[k])});d.users.forEach(u=>{SNAP['u|'+u.id]=ser({uid:u.uid,name:u.name,role:u.role,on:u.on})});return d},
+ SNAP={};ARR.forEach(k=>d[k].forEach(x=>{SNAP[k+'|'+x.id]=ser(x)}));['set','sch'].forEach(k=>{SNAP[k+'|main']=ser(d[k])});d.users.forEach(u=>{SNAP['u|'+u.id]=ser({uid:u.uid,name:u.name,role:u.role,on:u.on})});return d},
 save(d){const p=Q.catch(()=>{}).then(()=>push(d));Q=p;return p},
 async getBc(x){const r=await rest('/rest/v1/docs?coll=eq.bc&id=eq.'+encodeURIComponent(x.id)+'&select=data',{},tk());return r&&r[0]?r[0].data.img:''},
 async createUser(email,pw,name,role){const r=await rest('/auth/v1/signup',{method:'POST',body:JSON.stringify({email,password:pw})});const id=r.id||(r.user&&r.user.id);if(!id)throw new Error('Signup failed - check Supabase Auth settings');await rest('/rest/v1/profiles',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({user_id:id,uid:email,name,role,active:true})},tk());SNAP['u|'+id]=ser({uid:email,name,role,on:true});return id}};
-const API=CLOUD?K:L;API.SEED=seed;API.DR=DR;API.demo=demoData;API.siteUrl=siteUrl;API.IDS=IDS;API.PX=PX;API.ranking=ranking;window.API=API;
+/* ---------------- SERVER driver (PHP + SQLite, api.php) ---------------- */
+const SRV=C.api?new URL(C.api,location.origin+location.pathname.replace(/admin\/(index\.html)?$/,'').replace(/index\.html$/,'')).href:'';
+async function call(a,o){const r=await fetch(SRV,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':sessionStorage.getItem('au_stok')||''},body:JSON.stringify({...(o||{}),a})});const x=await r.text();let j=null;try{j=x?JSON.parse(x):null}catch(e){throw new Error('server')}if(!r.ok){const er=new Error(j&&j.error||'server');er.status=r.status;throw er}return j}
+async function spush(d){const up=[],del=[],uup=[],udel=[],seen={};
+ const add=(coll,id,obj)=>{const key=coll+'|'+id,s=ser(obj);seen[key]=1;if(SNAP[key]!==s)up.push({coll,id:String(id),key,s})};
+ ARR.forEach(k=>(d[k]||[]).forEach(x=>{if(!x.id)x.id=IDS();add(k,x.id,x)}));['set','sch'].forEach(k=>add(k,'main',d[k]));
+ for(const key in SNAP)if(!seen[key]&&!key.startsWith('u|')&&!key.startsWith('log|')){const p=key.indexOf('|');del.push({coll:key.slice(0,p),id:key.slice(p+1),key})}
+ (d.users||[]).forEach(u=>{const key='u|'+u.id,s=ser({uid:u.uid,name:u.name,role:u.role,on:u.on});seen[key]=1;if(SNAP[key]!==s||u.pass)uup.push({key,s,u})});
+ for(const key in SNAP)if(key.startsWith('u|')&&!seen[key])udel.push(key);
+ for(let i=0;i==0||i<up.length;i+=100){const b=up.slice(i,i+100),f=i==0;if(!b.length&&!(f&&(del.length||uup.length||udel.length)))break;
+  await call('save',{up:b.map(u=>({coll:u.coll,id:u.id,data:JSON.parse(u.s)})),del:f?del.map(x=>({coll:x.coll,id:x.id})):[],uup:f?uup.map(x=>({id:x.u.id,uid:x.u.uid,name:x.u.name,role:x.u.role,on:!!x.u.on,pass:x.u.pass||''})):[],udel:f?udel.map(k=>k.slice(2)):[]});
+  b.forEach(u=>{SNAP[u.key]=u.s});if(f){del.forEach(x=>{delete SNAP[x.key]});uup.forEach(x=>{SNAP[x.key]=x.s;delete x.u.pass});udel.forEach(k=>{delete SNAP[k]})}}}
+const S={mode:'server',
+content:()=>call('content'),
+apply:(kind,p)=>call('apply',{kind,payload:p}),
+lookup:(no,mobile)=>call('lookup',{no:norm(no),mobile:norm(mobile)}),
+result:roll=>call('result',{roll:norm(roll)}),
+verify:(roll,key)=>call('verify',{roll:norm(roll),key:norm(key)}),
+async login(id,pw){const r=await call('login',{uid:id,pass:pw});sessionStorage.setItem('au_stok',r.token);return r.user},
+async session(){if(!sessionStorage.getItem('au_stok'))return null;try{return await call('me')}catch(e){return null}},
+logout(){call('logout').catch(()=>{});sessionStorage.removeItem('au_stok')},
+async load(){const r=await call('load'),d=seed(false);ARR.forEach(k=>{d[k]=[]});
+ r.docs.forEach(x=>{if(x.c=='set'||x.c=='sch')d[x.c]=x.d;else if(d[x.c])d[x.c].push(x.d)});d.log.sort((a,b)=>b.t-a.t);d.users=r.users;if(!d.roles.length)d.roles=DR();
+ SNAP={};ARR.forEach(k=>d[k].forEach(x=>{SNAP[k+'|'+x.id]=ser(x)}));['set','sch'].forEach(k=>{SNAP[k+'|main']=ser(d[k])});d.users.forEach(u=>{SNAP['u|'+u.id]=ser({uid:u.uid,name:u.name,role:u.role,on:u.on})});return d},
+save(d){const p=Q.catch(()=>{}).then(()=>spush(d));Q=p;return p},
+async getBc(x){return(await call('bc',{id:x.id}))||''},
+async createUser(uid,pw,name,role){const id=await call('create_user',{uid,pass:pw,name,role});SNAP['u|'+id]=ser({uid,name,role,on:true});return id},
+setupNeeded:()=>call('setup_needed'),
+async setup(uid,pw,name){const s=seed(false);await call('setup',{uid,pass:pw,name,seed:{roles:s.roles,set:s.set,sch:s.sch}});return S.login(uid,pw)}};
+L.setupNeeded=K.setupNeeded=async()=>false;
+const API=C.api?S:CLOUD?K:L;API.SEED=seed;API.DR=DR;API.demo=demoData;API.siteUrl=siteUrl;API.IDS=IDS;API.PX=PX;API.ranking=ranking;window.API=API;
 })();

@@ -26,6 +26,9 @@ grant select,insert,update,delete on public.docs, public.profiles to authenticat
 create or replace function public.my_role() returns text language sql stable security definer set search_path=public as $$
   select role from public.profiles where user_id=auth.uid() and active $$;
 
+create or replace function public.my_uid() returns text language sql stable security definer set search_path=public as $$
+  select uid from public.profiles where user_id=auth.uid() and active $$;
+
 create or replace function public.perm(m text) returns text language plpgsql stable security definer set search_path=public as $$
 declare r jsonb; rl text:=public.my_role();
 begin
@@ -41,6 +44,10 @@ create or replace function public.can_view(c text) returns boolean language sql 
     when 'apps'  then public.perm('apps')<>'none' or public.perm('res')<>'none'
     when 'bc'    then public.perm('apps')<>'none'
     when 'roles' then public.my_role() is not null
+    -- already public through public_content(); letters and admit cards print from them
+    when 'set'   then public.my_role() is not null
+    when 'sch'   then public.my_role() is not null
+    when 'spn'   then public.my_role() is not null
     when 'log'   then public.my_role()='super'
     else public.perm(c)<>'none' end $$;
 
@@ -54,7 +61,8 @@ create or replace function public.can_edit(c text) returns boolean language sql 
     else public.perm(c)='edit' end $$;
 
 drop policy if exists docs_select on public.docs;
-create policy docs_select on public.docs for select to authenticated using (public.can_view(coll));
+-- an admin may read their own log rows: the panel saves with an upsert, and Postgres applies the select policy to upserted rows
+create policy docs_select on public.docs for select to authenticated using (public.can_view(coll) or (coll='log' and data->>'u'=public.my_uid()));
 drop policy if exists docs_insert on public.docs;
 create policy docs_insert on public.docs for insert to authenticated with check (public.can_edit(coll));
 drop policy if exists docs_update on public.docs;
@@ -86,6 +94,8 @@ begin
     select data into s from docs where coll='sch' and id='main';
     if s is null or not coalesce((s->>'open')::boolean,false) or now()>((s->>'end')||'T23:59:59+06')::timestamptz then raise exception 'closed'; end if;
     if coalesce(payload->>'name','')='' or coalesce(payload->>'father','')='' or (payload->>'mobile') !~ '^01[0-9]{9}$' or coalesce(payload->>'photo','')='' then raise exception 'invalid'; end if;
+    -- images are rendered unescaped in the admin panel: accept only base64 image data
+    if (payload->>'photo') !~ '^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$' or coalesce(payload->>'bc','') not in ('','PDF') and (payload->>'bc') !~ '^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$' then raise exception 'invalid'; end if;
     if exists(select 1 from docs where coll='apps' and data->>'name'=payload->>'name' and data->>'dob'=payload->>'dob' and data->>'mobile'=payload->>'mobile') then raise exception 'duplicate'; end if;
     n:='US26-'||lpad(nextval('public.app_seq')::text,4,'0'); did:=gen_random_uuid()::text; bc:=coalesce(payload->>'bc','');
     d:=jsonb_strip_nulls(jsonb_build_object('id',did,'no',n,'st','pending','at',(extract(epoch from now())*1000)::bigint,'hasbc',bc<>'',

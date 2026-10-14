@@ -5,16 +5,19 @@ Bangla website for **আমার ইউনিয়ন-দরগাপাশা
 ```
 index.html              Public website (forest green / white / yellow theme)
 admin/index.html        Super admin panel (same data, role-based permissions)
-js/api.js               Shared data layer: LOCAL mode (localStorage) and CLOUD mode (Supabase REST)
-config.js               Supabase URL + anon key (empty = local test mode)
+js/api.js               Shared data layer: LOCAL (localStorage), SERVER (api.php) and CLOUD (Supabase REST) drivers
+api.php                 PHP + SQLite backend for SERVER mode (no dependencies)
+data/                   SQLite database folder (web access blocked by .htaccess; *.sqlite is git-ignored)
+config.js               api:'api.php' (server) or Supabase URL + anon key (cloud); all empty = local test mode
 supabase/schema.sql     Tables, row level security, RPC functions, default roles/settings
 .github/workflows/pages.yml   GitHub Pages deployment
 docs/SETUP-BN.md        Step-by-step setup guide (Bangla)
 ```
 
-## Two modes
+## Three modes
 | Mode | When | Data |
 |---|---|---|
+| **Server** (active) | `api:'api.php'` in `config.js` | `api.php` + SQLite file `data/amarunion.sqlite` on your own PHP hosting (PHP 7.4+, `pdo_sqlite`). No external service. First visit to `/admin/` shows a one-time form to create the first super admin. Run locally: `php -S localhost:8000`. Takes priority over Supabase. |
 | **Local test** | `config.js` keys empty (default as delivered) | Browser `localStorage` (key `au_db`) seeded with demo data. Site and admin share it when served from the same origin. Demo logins are shown on the admin login page. **Not for production.** |
 | **Cloud** | `supabaseUrl` + `supabaseKey` set | Supabase database. Real auth (email + password), server-enforced permissions (RLS). |
 
@@ -29,6 +32,9 @@ Both pages use `js/api.js`, so everything the admin saves is what the website re
 - Website → admin: registrations, volunteer and education-support applications are written through `API.apply()` and appear in the admin panel (use ↻ Refresh; the panel also polls every 45 s).
 - Admin → website: site settings, projects, people, exam board/advisors, news, sponsors, scholarship settings (dates, prizes, open/closed), results publishing. Items with "show" turned off are not sent to the public site.
 - Applicant lookups (confirmation letter, admit card) require **application no. + mobile**. Results need the roll number (and results must be published). QR codes on admit cards carry a per-student random key (`vt`), so a roll number alone cannot reveal a student's photo.
+
+## Server (SQLite) data model
+`api.php` keeps the same document model: table `docs(coll,id,data)` with a few index columns (`no`, `roll`, `mob`, `dup`, `marks`, `own`) filled on write, plus `users` (bcrypt passwords), `sess` (hashed session tokens, 12 h), `meta` (application sequence) and `fails` (login throttling: 5 wrong passwords per IP + user id lock for 15 min). The permission checks in `api.php` mirror `perm/can_view/can_edit` in `schema.sql`. A save is one transaction: if any row is not allowed, nothing is written. `data/.htaccess` blocks web access to the database on Apache; on other servers block `data/` or set the `AU_DB` environment variable to a path outside the web root.
 
 ## Cloud data model
 One generic table `docs(coll,id,data jsonb)` + `profiles`. Collections: `set, sch` (single doc `main`), `proj, ppl, cm, news, spn, apps, bc, vol, edu, roles, log`. The admin panel diff-syncs only changed rows. Birth certificate images are stored in `bc` rows and loaded on demand.
@@ -46,7 +52,9 @@ Row level security (see `schema.sql`): `perm(module)` reads the user's role from
 ## What was tested
 - Browser (Chromium, automated), **local mode: 49/49 checks** – every public route, registration with photo + birth certificate, duplicate block, confirmation letter, admin approval → roll → marks → publish, admit card (2 copies on A4), result lookup, QR verify page, admin edits visible on the site, closing applications, role restrictions.
 - Browser, **cloud mode against a mock Supabase server (REST/auth/RPC): 21/21 checks** – login, content sync, registration via RPC, lazy birth certificate, admin refresh, approvals, user creation, edit/delete sync.
-- **NOT tested:** `schema.sql` against a real Postgres/Supabase (no database was available while building), real Supabase Auth behaviour (email confirmation settings), QR rendering (needs the cdnjs `qrcodejs` script – blocked in the sandbox), printing to real A4 paper. Please run the SQL on a fresh Supabase project and repeat the flows in the checklist before launch.
+- Node, **`schema.sql` + the cloud driver of `js/api.js` on a real Postgres engine (PGlite) behind a PostgREST-style shim: 65/65 checks** – schema run and re-run, anon access, every public RPC, row level security for `super`, `editor`, `exam` and `viewer`, save/load/delete per role, log handling, user creation.
+- **Server mode, `api.php` on PHP 8.0 (without mbstring) and PHP 8.4 (all warnings on):** 69/69 driver checks each (setup, users, passwords, sessions, throttling, every public call, permissions per role, transactions, XSS guard on uploads) and 55/55 admin panel UI checks in a headless DOM. Local mode admin UI: 70/70.
+- **NOT tested:** `api.php` on a real shared host (Apache `.htaccess`, file permissions), PHP 7.4 itself; a real Supabase project (PostgREST request parsing, Supabase Auth), real Supabase Auth behaviour (email confirmation settings), QR rendering (needs the cdnjs `qrcodejs` script – blocked in the sandbox), printing to real A4 paper. Please run the SQL on a fresh Supabase project and repeat the flows in the checklist before launch.
 
 ## Known limits / suggestions
 - No CAPTCHA or rate limiting on public submissions: add Cloudflare Turnstile or Supabase edge-function rate limits before large traffic.
